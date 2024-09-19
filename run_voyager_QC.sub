@@ -1,0 +1,49 @@
+#!/bin/bash
+#SBATCH --job-name=XenVal_QC
+#SBATCH --partition genD
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --error=slurm-%J.err
+#SBATCH --mem 128G
+#SBATCH --array=0-21 # one job for each Xenium output dir
+#SBATCH --time=4:00:00
+
+source ~/.bashrc
+conda activate spatial-2024
+
+# directory with xenium outputs:
+xenium_dir="/home/groups/singlecell/smorabito/collab/Valiente_2024/data/raw/"
+xenium_samples=($(ls $xenium_dir))
+
+# Xenium panel file:
+xenium_panel="/home/groups/singlecell/smorabito/collab/Valiente_2024/data/Xenium_hMulti_v1_metadata.csv"
+
+# get the current sample
+let index="$SLURM_ARRAY_TASK_ID"
+cur_sample=${xenium_samples[$index]}
+cur_indir=$xenium_dir$cur_sample/
+echo $cur_sample
+
+# get the sample ID and slide ID 
+slide_id=$(echo $cur_sample | awk -F__ '{ print $2 }')
+sample_id=$(echo $cur_sample | awk -F__ '{ print $3 }')
+
+echo $slide_id 
+echo $sample_id
+
+# set up the output dir
+outdir_parent="/home/groups/singlecell/smorabito/collab/Valiente_2024/individual/"
+outdir=$outdir_parent$sample_id/
+
+# run the R script 
+Rscript --vanilla /home/groups/singlecell/smorabito/collab/Valiente_2024/bin/xenium_QC_clustering.R \
+    --indir $cur_indir \
+    --panel $xenium_panel\
+    --sampleid $sample_id \
+    --slideid $slide_id\
+    --outdir $outdir \
+    --nCount-thresh 10 \
+    --nGene-thresh 10 \
+    --negcontrol-thresh 5 \
+    --cluster_res 0.5

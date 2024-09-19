@@ -1,0 +1,329 @@
+
+
+```{r eval=FALSE}
+
+# interactive 8 256G 10:00:00 genD
+
+library(Seurat)
+library(future)
+plan("multisession", workers = 8)
+library(ggplot2)
+
+
+
+
+setwd('~/collab/Valiente_2024/testing/')
+data_dir <- 'data/'
+fig_dir <- 'figures/'
+
+# directory for raw 
+
+# get a list of the xenium slides:
+raw_dir <- '~/collab/Valiente_2024/data/raw/Xenium_Outs/'
+xen_slides <- dir(raw_dir)
+
+# get a list of all samples:
+samples <- lapply(xen_slides, function(x){dir(paste0(raw_dir, x))})
+
+cur_sample <- samples[[1]][1]
+cur_file <- paste0(raw_dir, '/', xen_slides[1], '/', cur_sample)
+
+# Load the Xenium data
+xenium.obj <- LoadXenium(cur_file, fov = "fov")
+
+# remove cells with 0 counts
+xenium.obj <- subset(xenium.obj, subset = nCount_Xenium > 0)
+
+p <- ImageDimPlot(
+    xenium.obj, 
+    fov = "fov", 
+    molecules = rownames(xenium.obj)[1:4], 
+    nmols = 20000
+)
+
+pdf(paste0(fig_dir, 'test_imagedimplot.pdf'), width=5, height=5)
+p 
+dev.off()
+
+
+
+
+# clustering 
+xenium.obj <- NormalizeData(xenium.obj, assay = "Xenium")
+xenium.obj <- ScaleData(xenium.obj)
+xenium.obj <- RunPCA(xenium.obj, npcs = 30, features = rownames(xenium.obj))
+xenium.obj <- RunUMAP(xenium.obj, dims = 1:30)
+xenium.obj <- FindNeighbors(xenium.obj, reduction = "pca", dims = 1:30)
+xenium.obj <- FindClusters(xenium.obj, resolution = 0.3)
+
+
+p <- DimPlot(xenium.obj)
+pdf(paste0(fig_dir, 'umap_clustering.pdf'), width=10, height=10)
+p 
+dev.off()
+
+p <- ImageDimPlot(xenium.obj, cols = "polychrome", size = 0.75)
+
+p <- ImageDimPlot(xenium.obj, fov = "fov", axes = TRUE, border.color = "white", border.size = 0.1, cols = "polychrome",
+    coord.fixed = FALSE)
+
+
+pdf(paste0(fig_dir, 'spatial_clustering.pdf'), width=12, height=12)
+p 
+dev.off()
+
+
+cropped.coords <- Crop(xenium.obj[["fov"]], x = c(1200, 2900), y = c(3750, 4550), coords = "plot")
+xenium.obj[["zoom"]] <- cropped.coords
+# visualize cropped area with cell segmentations & selected molecules
+DefaultBoundary(xenium.obj[["zoom"]]) <- "segmentation"
+
+p <- ImageDimPlot(xenium.obj, fov = "zoom", axes = TRUE, border.color = "white", border.size = 0.1, cols = "polychrome",
+    coord.fixed = FALSE)
+
+
+pdf(paste0(fig_dir, 'spatial_clustering_zoom.pdf'), width=12, height=12)
+p 
+dev.off()
+
+
+```
+
+Try to make a combined object as a test:
+
+Note: 96 GB was not enough memory
+
+Problem with Seurat, taking FOREVER to make a joint object.
+There is one outlier sample that has 600k+ cells,
+and another with 300k + cells, but many of the samples have 
+a few thousand or 10k ish cells. This is making me wonder if it 
+makes sense to do a joint analysis at all?
+
+If this is still going by 11:15, I should kill it. I can grab the 
+meta-data in the loop and then get the basic QC stats from there. 
+Or maybe just start a new tmux instead of kill it.
+
+```{r eval=FALSE}
+
+
+# interactive 8 256G 10:00:00 genD
+
+library(Seurat)
+library(future)
+plan("multisession", workers = 8)
+library(ggplot2)
+
+# setup directories
+setwd('~/collab/Valiente_2024/testing/')
+data_dir <- 'data/'
+fig_dir <- 'figures/'
+
+
+# get a list of the xenium slides:
+raw_dir <- '~/collab/Valiente_2024/data/raw/Xenium_Outs/'
+xen_slides <- dir(raw_dir)
+
+# get a list of all samples:
+samples <- lapply(xen_slides, function(x){dir(paste0(raw_dir, x))})
+
+seurat_list <- list() 
+i <- 1
+for(cur_slide in xen_slides){
+
+    cur_samples <- dir(paste0(raw_dir, cur_slide))
+    for(cur_sample in cur_samples){
+        print(i)
+        print(cur_sample)
+        cur_file <- paste0(raw_dir, '/', cur_slide, '/', cur_sample)
+        cur_obj <- LoadXenium(cur_file, fov = cur_sample)
+        cur_obj$Sample <- cur_sample
+        cur_obj$Slide <- cur_slide
+        seurat_list[[cur_sample]] <- cur_obj
+        i <- i + 1 
+    }
+}
+
+xenium.obj <- merge(
+    seurat_list[[1]], seurat_list[2:length(seurat_list)]
+)
+dim(xenium.obj)
+
+# save the object!!!
+saveRDS(xenium.obj, file=paste0(data_dir, 'xenium_merged_seurat.rds'))
+
+
+# first sample
+cur_sample <- samples[[1]][1]
+cur_file <- paste0(raw_dir, '/', xen_slides[1], '/', cur_sample)
+xenium.obj1 <- LoadXenium(cur_file, fov = "fov")
+xenium.obj1$Sample <- cur_sample
+
+# second sample
+cur_sample <- samples[[1]][2]
+cur_file <- paste0(raw_dir, '/', xen_slides[1], '/', cur_sample)
+xenium.obj2 <- LoadXenium(cur_file, fov = "fov")
+xenium.obj2$Sample <- cur_sample
+xenium.obj2$Slide <- xen_slides[1]
+
+xenium.obj <- merge(xenium.obj1, xenium.obj2)
+dim(xenium.obj)
+table(xenium.obj$Sample)
+
+# remove cells with 0 counts
+xenium.obj <- subset(xenium.obj, subset = nCount_Xenium > 0)
+table(xenium.obj$nCount_Xenium > 0)
+
+p1 <- ImageDimPlot(
+    xenium.obj, 
+    fov = "fov", 
+    molecules = rownames(xenium.obj)[1:4], 
+    nmols = 20000
+)
+
+
+p2 <- ImageDimPlot(
+    xenium.obj, 
+    fov = "fov.2", 
+    molecules = rownames(xenium.obj)[1:4], 
+    nmols = 20000
+)
+
+pdf(paste0(fig_dir, 'test_imagedimplot_merged.pdf'), width=10, height=5)
+p1 + p2
+dev.off()
+
+```
+
+
+
+```{r eval=FALSE}
+
+
+# interactive 8 256G 10:00:00 genD
+
+library(Seurat)
+library(future)
+plan("multisession", workers = 8)
+library(ggplot2)
+library(cowplot)
+library(tidyverse)
+theme_set(theme_cowplot())
+
+# setup directories
+setwd('~/collab/Valiente_2024/testing/')
+data_dir <- 'data/'
+fig_dir <- 'figures/'
+
+
+# get a list of the xenium slides:
+raw_dir <- '~/collab/Valiente_2024/data/raw/Xenium_Outs/'
+xen_slides <- dir(raw_dir)
+
+# get a list of all samples:
+samples <- lapply(xen_slides, function(x){dir(paste0(raw_dir, x))})
+
+xen_meta <- data.frame()
+i <- 1
+for(cur_slide in xen_slides){
+
+    cur_samples <- dir(paste0(raw_dir, cur_slide))
+    for(cur_sample in cur_samples){
+        print(i)
+        print(cur_sample)
+        cur_file <- paste0(raw_dir, '/', cur_slide, '/', cur_sample)
+        cur_obj <- LoadXenium(cur_file, fov = cur_sample)
+        cur_obj$Sample <- cur_sample
+        cur_obj$Slide <- cur_slide
+        xen_meta <- rbind(xen_meta, cur_obj@meta.data)
+        i <- i + 1 
+    }
+}
+
+# save the object!!!
+write.csv(xen_meta, file=paste0(data_dir, 'xenium_combined_meta.csv'), quote=FALSE)
+
+# extract info from the Sample name 
+sample_names <- xen_meta$Sample 
+tmp <- do.call(rbind, str_split(sample_names, '__'))
+xen_meta$xen_slide <- as.factor(tmp[,2])
+xen_meta$sample_id <- as.factor(tmp[,3])
+xen_meta$exp_date <- tmp[,4] 
+
+
+# QC Distribution plots:
+
+p <- xen_meta %>% 
+    group_by(xen_slide) %>% arrange(sample_id) %>% ungroup %>%
+    ggplot(aes(x = sample_id, y = nCount_Xenium, fill=sample_id)) + 
+    geom_violin() + 
+    geom_boxplot(width=0.1, outlier.shape=NA, fill='white') + 
+    RotatedAxis() + 
+    NoLegend() + 
+    theme(
+        panel.grid.major.y=element_line(color='lightgrey', linewidth=0.5)
+    ) + xlab('')
+
+pdf(paste0(fig_dir, 'merged_QC_nCountXenium_facet.pdf'), width=8, height=8)
+p + facet_wrap(~xen_slide, ncol=2, scales='free')
+dev.off()
+
+
+p <- xen_meta %>% 
+    group_by(xen_slide) %>% arrange(sample_id) %>% ungroup %>%
+    ggplot(aes(x = sample_id, y = nFeature_Xenium, fill=sample_id)) + 
+    geom_violin() + 
+    geom_boxplot(width=0.1, outlier.shape=NA, fill='white') + 
+    RotatedAxis() + 
+    NoLegend() + 
+    theme(
+        panel.grid.major.y=element_line(color='lightgrey', linewidth=0.5)
+    ) + xlab('')
+
+pdf(paste0(fig_dir, 'merged_QC_nFeatureXenium_facet.pdf'), width=8, height=8)
+p + facet_wrap(~xen_slide, ncol=2, scales='free')
+dev.off()
+
+
+# number of cells per sample 
+plot_df <- xen_meta %>% 
+    group_by(xen_slide, sample_id) %>% 
+    summarise(count = n()) %>% 
+    arrange(-count) 
+plot_df$sample_id <- factor(as.character(plot_df$sample_id), levels=as.character(plot_df$sample_id))
+
+p1 <- plot_df %>%
+    ggplot(aes(x=sample_id, y = count, fill=sample_id)) + 
+    geom_bar(stat='identity') + 
+   # facet_wrap(~xen_slide, ncol=2, scales='free') + 
+    RotatedAxis() + NoLegend() + xlab('') + ylab('N cells') +
+    ggtitle('Number of cells detected per sample') + 
+    theme(plot.title=element_text(hjust=0.5))
+
+p2 <- plot_df %>%
+    ggplot(aes(x=sample_id, y = count, fill=sample_id)) + 
+    geom_bar(stat='identity') + 
+    scale_y_log10() + 
+    geom_text(aes(y = count, label = count), hjust = 1.5, colour = "black", angle=90) +
+   # facet_wrap(~xen_slide, ncol=2, scales='free') + 
+    RotatedAxis() + NoLegend() + xlab('') + ylab('N cells') +
+    ggtitle('Number of cells detected per sample (log10 scale)') + 
+    theme(plot.title=element_text(hjust=0.5))
+
+
+pdf(paste0(fig_dir, 'merged_QC_n_cells_facet.pdf'), width=8, height=8)
+p1 / p2 
+dev.off()
+
+p <- xen_meta %>%
+    ggplot(aes(x=nCount_Xenium, y=nFeature_Xenium)) +
+    geom_bin2d() +
+    facet_wrap(~sample_id, ncol=8) + 
+    RotatedAxis() + 
+    scale_fill_gradient(trans="log")
+    
+pdf(paste0(fig_dir, 'merged_QC_nCount_vs_nFeature_facet.pdf'), width=12, height=6)
+p
+dev.off()
+
+
+```

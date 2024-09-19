@@ -1,0 +1,613 @@
+
+
+
+
+
+Old below 
+
+
+Creating a SpatialFeatureExperiment object 
+
+https://pachterlab.github.io/voyager/articles/create_sfe.html
+
+```{r eval=FALSE}
+
+setwd('~/collab/Valiente_2024/testing/')
+data_dir <- 'data/'
+fig_dir <- 'figures/'
+
+# directory for one sample
+test_raw_dir <- "~/collab/Valiente_2024/data/raw/Xenium_Outs/20240531__100448__valienteman_05/output-XETG00311__0022384__10032256__20240531__100712/"
+
+#dir_use <- XeniumOutput("v2", file_path = test_raw_dir)
+
+# just have to run this twice for it to work, makes absolutely no sense at all!
+try(sfe <- readXenium(test_raw_dir, add_molecules=TRUE))
+sfe <- readXenium(test_raw_dir, add_molecules=TRUE)
+
+# panel metadata
+panel_meta <- read.csv('~/collab/Valiente_2024/data/Xenium_hMulti_v1_metadata.csv')
+rownames(panel_meta) <- panel_meta$Gene
+rowData(sfe)[panel_meta$Gene, 'Annotation'] <- panel_meta$Annotation
+
+# add sample name and slide name:
+cur_sample <- '10032256'
+cur_slide <- '0022384'
+colData(sfe)$SampleID <- cur_sample 
+colData(sfe)$xen_slide <- cur_slide
+
+# add coordinates to the colData
+coords <- spatialCoords(sfe)
+colData(sfe)$x_centroid <- coords[,1]
+colData(sfe)$y_centroid <- coords[,2]
+
+# create a new output directory for this sample 
+fig_dir <- paste0('figures/', cur_sample, '/')
+dir.create(fig_dir)
+
+```
+
+
+Analyze  this sample
+
+```{r eval=FALSE}
+# #-----------------------------------------------------------------------
+# Analysis
+# https://pachterlab.github.io/voyager/articles/vig5_xenium.html#introduction
+# For QC, which cells do we remove?
+# * "cells" with too many of the negative control genes?
+# * "cells" that don't have a nucleus? 
+# * "cells" that are floating outside of the tissue block. 
+#    Not sure how we accomplish this systematically
+# #------------------------------------------------------------------------
+
+# plot the image channels
+
+channels <- 1:4 
+plot_list <- list()
+for(cur_ch in channels){
+    plot_list[[cur_ch]] <- plotImage(
+        sfe, 
+        dark=TRUE, image_id='morphology_focus',
+        channel = cur_ch,
+        maxcell=10e+06
+    )
+}
+
+pdf(paste0(fig_dir, 'image_channels.pdf'), width=8, height=4)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+p <- plotImage(
+        sfe, 
+        dark=TRUE, image_id='morphology_focus',
+        channel = c(3,2,1),
+        maxcell=10e+06
+    )
+
+
+pdf(paste0(fig_dir, 'image_channels_combined.pdf'), width=5, height=5)
+p
+dev.off()
+
+
+#------------------------------------------------------------------------
+# Cell Segmentation plots
+#------------------------------------------------------------------------
+
+# plot the geometry 
+p <- plotGeometry(sfe, "cellSeg")
+pdf(paste0(fig_dir, 'cell_segmentation_geometry.pdf'), width=5, height=5)
+p 
+dev.off()
+
+# plot cell density 
+p <- plotCellBin2D(sfe) + coord_equal()
+pdf(paste0(fig_dir, 'cell_segmentation_density.pdf'), width=5, height=5)
+p 
+dev.off()
+
+#------------------------------------------------------------------------
+# Quality Control 
+#------------------------------------------------------------------------
+
+# calculate the number of counts and genes expressed in each cell 
+tmp <- counts(sfe)
+sfe$nCounts <- colSums(tmp)
+tmp[tmp != 0] <- 1
+sfe$nGenes <- colSums(tmp)
+
+# how many cells have fewer than 10 genes?
+table(sfe$nGenes > 10)
+
+# how many cells have fewer than 10 counts?
+table(sfe$nCounts > 10)
+
+# calculate the proportion of nuc area / cell area 
+colData(sfe)$prop_nuc <- sfe$nucleus_area / sfe$cell_area
+
+# are there any outliers where the nuc size is bigger than the cell size?
+sum(na.omit(sfe$prop_nuc) > 1)
+
+# how many cells did not have a nuc detected?
+sum(is.na(sfe$nucleus_area))
+
+# remove cells without the nucleus
+# sfe <- sfe[,!is.na(sfe$nucleus_area)]
+
+# QC stat distributions
+p <- plotColDataHistogram(sfe, c("nCounts", "nGenes", "cell_area", "nucleus_area"), ncol=2)
+pdf(paste0(fig_dir, 'qc_stats_histogram.pdf'), width=5, height=5)
+p 
+dev.off()
+
+p <- scater::plotColData(sfe, x="nCounts", y="nGenes", bins = 100)
+pdf(paste0(fig_dir, 'qc_genes_vs_counts.pdf'), width=5, height=5)
+p 
+dev.off()
+
+p <- plotColData(sfe, x='cell_area', y='nucleus_area', bins=100)
+pdf(paste0(fig_dir, 'qc_cell_vs_nuc.pdf'), width=5, height=5)
+p 
+dev.off()
+
+p <- plotSpatialFeature(sfe, "prop_nuc", colGeometryName = "cellSeg")
+pdf(paste0(fig_dir, 'qc_proportion_nuclei_per_cell.pdf'), width=5, height=5)
+p 
+dev.off()
+
+
+#------------------------------------------------------------------------
+# Quality Control with Neg Control Features
+#------------------------------------------------------------------------
+
+sfe <- addPerCellQCMetrics(
+    sfe, subsets = list(
+        "negCodeword" = rowData(sfe)$Type == 'Negative Control Codeword',
+        "negProbe" = rowData(sfe)$Type == 'Negative Control Probe',
+        "unassigned" = rowData(sfe)$Type == 'Unassigned Codeword'
+    )
+)
+
+cols_use <- names(colData(sfe))[str_detect(names(colData(sfe)), "_percent$")]
+
+p <- plotColDataHistogram(sfe, cols_use, bins = 100, ncol = 3) + 
+    scale_x_log10() +
+    annotation_logticks(sides = "b")
+
+pdf(paste0(fig_dir, 'qc_negControl_histogram.pdf'), width=6, height=3)
+p 
+dev.off()
+
+# how many cells have the negative control expression?
+table(colData(sfe)$total > 0)
+
+nc_thresh <- 5 
+colData(sfe)$control_percent <- colData(sfe)$subsets_negCodeword_percent + colData(sfe)$subsets_negProbe_percent + colData(sfe)$subsets_unassigned_percent
+colData(sfe)$is_nc_outlier <- colData(sfe)$subsets_negCodeword_percent > nc_thresh | 
+    colData(sfe)$subsets_negProbe_percent > nc_thresh | 
+    colData(sfe)$subsets_unassigned_percent > nc_thresh 
+
+table(colData(sfe)$is_nc_outlier)
+
+#------------------------------------------------------------------------
+# Quality Control of Genes
+#------------------------------------------------------------------------
+
+rowData(sfe)$means <- rowMeans(counts(sfe))
+rowData(sfe)$vars <- rowVars(counts(sfe))
+
+p <- plotRowData(sfe, x = "means", y = "Type") +
+    scale_y_log10() +
+    annotation_logticks(sides = "b")
+
+pdf(paste0(fig_dir, 'qc_Genes_mean_expression.pdf'), width=6, height=3)
+p 
+dev.off()
+
+
+p <- plotRowData(sfe, x="means", y="vars", color_by = "Type") +
+    geom_abline(slope = 1, intercept = 0, color = "red") +
+    scale_x_log10() + scale_y_log10() +
+    annotation_logticks() +
+    coord_equal() +
+    labs(color = "Negative control")
+
+pdf(paste0(fig_dir, 'qc_Genes_mean_var_expression.pdf'), width=6, height=6)
+p 
+dev.off()
+
+
+#------------------------------------------------------------------------
+# QC Filtering of low-quality cells
+# * No nucleus found 
+# * Expression of negative controls 
+# * Very low transcript counts
+#------------------------------------------------------------------------
+
+count_thresh <- 10
+gene_thresh <- 10
+
+colData(sfe)$low_quality <- is.na(colData(sfe)$nucleus_area) | colData(sfe)$nCounts < count_thresh | colData(sfe)$nGenes < gene_thresh | colData(sfe)$is_nc_outlier
+
+table(colData(sfe)$low_quality)
+
+# where are the low quality cells ?
+p <- plotSpatialFeature(
+    sfe, "low_quality", 
+    colGeometryName = "cellSeg",
+    dark=TRUE, image_id='morphology_focus',
+    channel = 2,
+    maxcell=10e+06
+)
+pdf(paste0(fig_dir, 'qc_low_quality_spatial.pdf'), width=6, height=6)
+p 
+dev.off()
+
+# filter out the lowquality cells:
+sfe <- sfe[,!colData(sfe)$low_quality]
+dim(sfe)
+
+#------------------------------------------------------------------------
+# Moran's I of QC features
+# not super informative here
+#------------------------------------------------------------------------
+
+colGraph(sfe, "knn5") <- findSpatialNeighbors(
+    sfe, 
+    method = "knearneigh", 
+    dist_type = "idw", k = 5, 
+    style = "W"
+)
+
+sfe <- colDataMoransI(sfe, c("nCounts", "nGenes", "cell_area", "nucleus_area"),
+                      colGraphName = "knn5")
+
+sfe <- colDataUnivariate(sfe, type = "localmoran", 
+                         features = c("nCounts", "nGenes", "cell_area", 
+                                      "nucleus_area"),
+                         colGraphName = "knn5", BPPARAM = MulticoreParam(2))
+
+p <- plotLocalResult(sfe, "localmoran",
+                features = c("nCounts", "nGenes", "cell_area", "nucleus_area"),
+                colGeometryName = "centroids", scattermore = TRUE,
+                divergent = TRUE, diverge_center = 0, pointsize = 1)
+
+
+pdf(paste0(fig_dir, 'qc_autocorrelation.pdf'), width=10, height=5)
+p 
+dev.off()
+
+sfe <- colDataUnivariate(sfe, "moran.plot", "nCounts", colGraphName = "knn5")
+
+p1 <- moranPlot(sfe, "nCounts", binned = TRUE, plot_influential = FALSE) 
+p2 <- moranPlot(sfe, "nCounts", binned = TRUE)
+
+pdf(paste0(fig_dir, 'qc_autocorrelation_lineplot.pdf'), width=12, height=6)
+p1 / p2 + plot_layout(guides = "collect")
+dev.off()
+
+
+#-------------------------------------------------------------------------
+# Moran's I Gene Expression
+#-------------------------------------------------------------------------
+
+# remove the negative controls
+sfe <- sfe[rowData(sfe)$Type == 'Gene Expression',]
+
+# log normalize the counts
+sfe <- logNormCounts(sfe)
+
+sfe <- runMoransI(sfe, colGraphName = "knn5", BPPARAM = MulticoreParam(8))
+
+p <- plotRowData(sfe, x = "means", y = "moran_sample01") + 
+    scale_x_log10() 
+
+
+pdf(paste0(fig_dir, 'qc_mean_vs_moranI.pdf'), width=6, height=6)
+p
+dev.off()
+
+#-------------------------------------------------------------------------
+# Dim Reduction and clustering
+#-------------------------------------------------------------------------
+
+set.seed(2024)
+sfe <- runPCA(sfe, ncomponents = 30, scale = TRUE, BSPARAM = IrlbaParam())
+
+# leiden clustering
+colData(sfe)$cluster <- clusterRows(
+    reducedDim(sfe, "PCA")[,1:15],
+    BLUSPARAM = SNNGraphParam(
+        cluster.fun = "leiden",
+        cluster.args = list(
+            resolution_parameter = 0.5,
+            objective_function = "modularity"
+        )
+    )
+)
+
+# UMAP 
+sfe <- runUMAP(sfe, dimred='PCA')
+
+# plot the clusters in space
+p <- plotSpatialFeature(sfe, "cluster", colGeometryName = "cellSeg") + facet_wrap(~cluster)
+pdf(paste0(fig_dir, 'leiden_spatial_split.pdf'), width=8, height=6)
+p
+dev.off()
+
+p <- plotSpatialFeature(sfe, "cluster", colGeometryName = "cellSeg", dark=TRUE,
+    image_id='morphology_focus',
+    channel = 2,
+    maxcell=10e+06) 
+pdf(paste0(fig_dir, 'leiden_spatial_dark.pdf'), width=8, height=6)
+p
+dev.off()
+
+# plot the clusters in space
+p <- plotSpatialFeature(sfe, "cluster", colGeometryName = "cellSeg", dark=TRUE) + facet_wrap(~cluster)
+pdf(paste0(fig_dir, 'leiden_spatial_dark_split.pdf'), width=8, height=6)
+p
+dev.off()
+
+p <- plotSpatialFeature(sfe, "cluster", colGeometryName = "centroids") 
+pdf(paste0(fig_dir, 'leiden_spatial_centroids.pdf'), width=8, height=6)
+p
+dev.off()
+
+p <- plotSpatialFeature(sfe, "cluster", colGeometryName = "cellSeg") 
+pdf(paste0(fig_dir, 'leiden_spatial.pdf'), width=8, height=6)
+p
+dev.off()
+
+# get the color scheme
+g <- ggplot_build(p)
+color_df <- g$data[[1]] %>% dplyr::select(c('group', 'fill')) %>% dplyr::distinct()
+cp <- color_df$fill 
+names(cp) <- color_df$group
+
+# plot the UMAP colored by cluster
+p <- plotUMAP(sfe, colour_by = 'cluster') + scale_color_manual(values=cp)
+pdf(paste0(fig_dir, 'leiden_umap.pdf'), width=6, height=6)
+p
+dev.off()
+
+p <- plotColData(sfe, x = "cluster", y = "nCounts")
+pdf(paste0(fig_dir, 'leiden_nCounts.pdf'), width=6, height=6)
+p
+dev.off()
+
+# average counts per cluster 
+colData(sfe) %>% as.data.frame() %>%
+    group_by(cluster) %>% 
+    summarise(mean(nCounts))
+
+
+#-------------------------------------------------------------------------
+# Niche analysis with imcRtools
+#
+# https://www.bioconductor.org/packages/release/bioc/vignettes/imcRtools/inst/doc/imcRtools.html#5_Spatial_analysis
+# very interesting analysis but I think this should be done after 
+# cell types have been identified 
+#-------------------------------------------------------------------------
+
+#library(imcRtools)
+
+# this seems to mess up the object so will need to make a new obj
+sfe2 <- imcRtools::buildSpatialGraph(
+    sfe, img_id = "SampleID",
+    type = 'knn', 
+    coords = c('x_centroid', 'y_centroid'),
+    k=5,
+)
+
+sfe2 <- imcRtools::aggregateNeighbors(
+    sfe2,
+    "knn_interaction_graph",
+    aggregate_by = "metadata",
+    count_by = "cluster"
+)
+
+
+
+
+k_list <- 2:7
+
+head(sfe2$aggregatedNeighbors)
+
+set.seed(22)
+
+for(cur_k in k_list){
+    cur_cluster <- kmeans(sfe2$aggregatedNeighbors, centers = cur_k)
+    cluster_name <- paste0('niche_neighbors_knn', cur_k)
+    colData(sfe)[,cluster_name] <- factor(cur_cluster$cluster)
+}
+
+
+
+p <- plotSpatialFeature(
+        sfe, cluster_name, 
+        colGeometryName = "cellSeg") 
+
+plot_list <- list()
+for(cur_k in k_list){
+    cluster_name <- paste0('niche_neighbors_knn', cur_k)
+    plot_list[[cluster_name]] <- plotSpatialFeature(
+        sfe, cluster_name, 
+        colGeometryName = "cellSeg") 
+}
+
+pdf(paste0(fig_dir, 'leiden_spatial_niches_dark.pdf'), width=12, height=8)
+wrap_plots(plot_list, ncol=3)
+dev.off()
+
+
+
+# using the tutorial dataset so I know what they are expecting:
+library(cytomapper)
+
+data("pancreasSCE")
+
+pancreasSCE <- buildSpatialGraph(pancreasSCE, img_id = "ImageNb",
+                                 type = "knn",
+                                 k = 5)
+
+colPairNames(pancreasSCE)
+
+
+
+#-------------------------------------------------------------------------
+# save the SFE object
+#-------------------------------------------------------------------------
+saveRDS(sfe, file= paste0(data_dir, 'voyager_sfe_', cur_sample, '.rds'))
+
+
+#-------------------------------------------------------------------------
+# Save the meta-data and the CxG matrix 
+# will help with the downstream integrated analysis
+#-------------------------------------------------------------------------
+
+#-------------------------------------------------------------------------
+# Cluster marker genes (Seurat FindMarkers)
+#-------------------------------------------------------------------------
+library(Seurat)
+
+X <- as(logcounts(sfe), "dgCMatrix")
+rownames(X) <- rownames(sfe); colnames(X) <- colnames(sfe)
+X_assay <- SeuratObject::CreateAssayObject(X)
+
+markers <- data.frame()
+groups <- as.character(unique(colData(sfe)$cluster))
+for(cur_group in groups){
+
+    print(cur_group)
+
+    b1 <- colnames(sfe)[colData(sfe)$cluster == cur_group]
+    b2 <- colnames(sfe)[colData(sfe)$cluster != cur_group] 
+
+    # run differential test on the ME assay
+    cur_markers <- FindMarkers(
+      X_assay,
+      cells.1 = b1,
+      cells.2 = b2,
+      slot='counts',
+      test.use='wilcox',
+      only.pos=FALSE,
+      logfc.threshold=0,
+      min.pct=0.0
+    )
+    cur_markers$gene <- rownames(cur_markers)
+    cur_markers$group <- cur_group
+
+    # add annotation info
+    cur_markers$Annotation <- rowData(sfe)[cur_markers$gene, 'Annotation']
+    
+    markers <- rbind(markers, cur_markers)
+
+}
+
+subset(markers, group == '8' & p_val_adj < 0.05 & avg_log2FC > 2)
+
+# get list of genes to plot
+genes_plot <- markers %>% subset(avg_log2FC > 2) %>% .$gene %>% unique()
+genes_plot_groups <- lapply(groups, function(x){subset(markers, group == x & avg_log2FC > 2) %>% .$gene})
+names(genes_plot_groups) <- groups
+gene_list_lengths <- as.numeric(unlist(lapply(genes_plot_groups, function(x){length(x)})))
+
+# set cluster factor level
+markers$group <- factor(as.character(markers$group), levels=groups)
+plot_df <- subset(markers, gene %in% genes_plot) %>% 
+    arrange(group, -avg_log2FC)
+
+# limit fill plotting range
+fc_max <- 3
+plot_df$avg_log2FC <- ifelse(abs(plot_df$avg_log2FC) > fc_max, sign(plot_df$avg_log2FC)*fc_max, plot_df$avg_log2FC )
+
+# set gene factor level
+plot_df$gene <- factor(as.character(plot_df$gene), levels=rev(genes_plot))
+
+# create gene + annotation label
+plot_df$label <- paste0(
+    as.character(plot_df$gene), ', ', as.character(plot_df$Annotation)
+)
+
+# order the labels
+labels_plot <- paste0(genes_plot, ', ', panel_meta[genes_plot, 'Annotation'])
+plot_df$label <- factor(as.character(plot_df$label), levels=rev(labels_plot))
+
+# make a separate heatmap for each cluster
+plot_list <- list()
+for(cur_group in groups){
+    cur_genes <- genes_plot_groups[[cur_group]]
+    p <- plot_df %>% 
+        subset(gene %in% cur_genes) %>% 
+         ggplot(aes(x=group, y=gene, fill=avg_log2FC)) + 
+        geom_tile() + 
+        scale_fill_gradient2(high='yellow', low='purple', mid='black') + 
+        labs(fill='log2FC') +
+        xlab('Cluster') + ylab('') + theme(
+            axis.text.y = element_text(size=3),
+            plot.margin = margin(0,0,0,0)
+        ) 
+
+    if(cur_group != groups[[length(groups)]]){
+        p <- p + theme(
+            axis.title.x = element_blank(),
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank(),
+            axis.line.x = element_blank()
+        )
+    }
+    plot_list[[cur_group]] <- p
+
+}
+
+# plot with patchwork
+p <- wrap_plots(plot_list, ncol=1) + plot_layout(guides='collect', heights=gene_list_lengths)
+pdf(paste0(fig_dir, 'leiden_marker_heatmap.pdf'), width=4, height=10)
+p
+dev.off()
+
+
+
+# make a separate heatmap for each cluster
+plot_list <- list()
+for(cur_group in groups){
+    cur_genes <- genes_plot_groups[[cur_group]]
+    p <- plot_df %>% 
+        subset(gene %in% cur_genes) %>% 
+         ggplot(aes(x=group, y=label, fill=avg_log2FC)) + 
+        geom_tile() + 
+        scale_fill_gradient2(high='yellow', low='purple', mid='black') + 
+        labs(fill='log2FC') +
+        xlab('Cluster') + ylab('') + theme(
+            axis.text.y = element_text(size=3),
+            plot.margin = margin(0,0,0,0)
+        ) 
+
+    if(cur_group != groups[[length(groups)]]){
+        p <- p + theme(
+            axis.title.x = element_blank(),
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank(),
+            axis.line.x = element_blank()
+        )
+    }
+    plot_list[[cur_group]] <- p
+
+}
+
+# plot with patchwork
+p <- wrap_plots(plot_list, ncol=1) + plot_layout(guides='collect', heights=gene_list_lengths)
+pdf(paste0(fig_dir, 'leiden_marker_heatmap_annotation.pdf'), width=10, height=10)
+p
+dev.off()
+
+# write the output table
+write.table(markers, file=paste0(data_dir, cur_sample, '_leiden_markers.tsv'), sep='\t', quote=FALSE, row.names=FALSE)
+
+# re-load the results
+df <- read.delim(file=paste0(data_dir, cur_sample, '_leiden_markers.tsv'), sep='\t')
+
+
+```

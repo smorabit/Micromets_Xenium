@@ -1,0 +1,1182 @@
+
+Which samples are likely good?
+
+Definitely good:
+* 134990_left
+* 134990_right
+* 10010900 - Good but there are a lot of mets here 
+* 10058583 - Probably a lot of good stuff but this is the 300k cell sample so will be painful to analyze
+
+
+Maybe good:
+* 10025592_right - Maybe there's 1-2 mets here 
+* 1002675_1 - Looks like a lot of tumor cells but hard to see the vessels 
+* 1002675_2 - Looks like a lot of tumor cells but hard to see the vessels 
+* 10032256 - Might be just one big tumor piece, not sure if these are individual micromets but should try this one
+* 10032257 - I see vessels but not a ton of tumor around, worth a try 
+* 10040212_a - A few vessels, maybe some cancer cells 
+
+Maybe bad:
+* 137319_a - no clear micromet from tx clusters. Can see vessels but don't get see anything around it.
+* 137319_b - no clear micromet 
+* 10025592_left_a - no clear micromet 
+* 10040212_b - Maybe 1 vessel? 
+* 10041232_down (a, b, c) 
+
+
+Definitely Bad:
+* 1004112_up
+* 10025592_left_b
+
+```{r eval=FALSE}
+
+# interactive 8 128G 10:00:00 genD
+# conda activate spatial-2024
+
+# note: don't update packages!!!!!!!
+
+library(Voyager)
+library(SpatialFeatureExperiment)
+library(rjson)
+library(Matrix)
+library(SFEData)
+library(RBioFormats)
+
+
+library(SingleCellExperiment)
+library(SpatialExperiment)
+library(ggplot2)
+library(stringr)
+library(scater) 
+library(scuttle)
+library(BiocParallel)
+library(BiocSingular)
+library(bluster)
+library(scran)
+library(patchwork)
+library(cowplot)
+theme_set(theme_cowplot())
+library(Seurat)
+library(tidyverse)
+
+
+```
+
+
+
+Analysis for sample 134990_right
+
+```{r eval=FALSE}
+
+set.seed(22)
+
+setwd('~/collab/Valiente_2024/individual/')
+data_dir <- 'data/'
+fig_dir <- 'figures/'
+
+# load one SFE dataset
+cur_sample <- '134990_right'
+sfe <- readRDS(paste0(cur_sample, '/data/voyager_sfe_', cur_sample, '.rds'))
+
+# re-load the subset dataset
+sfe_sub <- readRDS(file=paste0(cur_sample, '/data/voyager_sfe_', cur_sample, '_micromet_clustering.rds'))
+sfe_tumor <- sfe_sub[,sfe_sub$cell_group == 'Tumor']
+
+# exclude micromets with only 1 tumor cell 
+mm_exclude <- names(which(table(sfe_tumor$spatial_community) == 1))
+sfe_tumor <- sfe_tumor[,!sfe_tumor$spatial_community %in% mm_exclude]
+
+# get the log-normalized expression matrix
+X <- as(logcounts(sfe), "matrix") 
+logcounts(sfe) <- X
+
+#-----------------------------------------------------------------
+# Broad cell type annotation based on marker genes + 
+# transcriptomic clusters
+#-----------------------------------------------------------------
+
+
+ct_df <- data.frame(
+    cluster = c(1:13),
+    cell_group = c(
+        'CNS', 'CNS', 'Tumor', 'Vasculature',
+        'CNS', 'Immune', 'Immune', 'Vasculature', 'Immune',
+        'CNS', 'Tumor', 'Tumor', 'Vasculature'
+        )
+)
+
+tmp <- as.data.frame(colData(sfe))
+tmp$cluster <- as.numeric(tmp$cluster)
+test <- left_join(
+    tmp, 
+    ct_df, 
+    by = 'cluster'
+)
+colData(sfe)$cell_group <- test$cell_group
+
+# plot the UMAP colored by cluster
+p <- plotUMAP(sfe, colour_by = 'cell_group') 
+pdf(paste0(cur_sample, '/figures/', 'leiden_umap_label.pdf'), width=6, height=6)
+print(p)
+dev.off()
+
+
+p <- plotSpatialFeature(sfe, "cell_group", colGeometryName = "cellSeg") 
+pdf(paste0(cur_sample, '/figures/','leiden_spatial_label.pdf'), width=8, height=6)
+print(p)
+dev.off()
+
+
+
+#---------------------------------------------------------------
+# step 1: KNN clustering based on spatial coordinates 
+#---------------------------------------------------------------
+
+sfe2 <- imcRtools::buildSpatialGraph(
+    sfe, img_id = "SampleID",
+    type = 'knn', 
+    coords = c('x_centroid', 'y_centroid'),
+    k=10,
+)
+
+# aggregate neighbors by expression levels 
+sfe2 <- imcRtools::aggregateNeighbors(
+    sfe2,
+    colPairName="knn_interaction_graph",
+    aggregate_by = "expression",
+    assay_type='logcounts'
+)
+
+#---------------------------------------------------------------
+# step 2: K-means clustering based on neighbor aggregates
+#---------------------------------------------------------------
+
+# k values to sweep
+k_list <- 2:6
+
+# kmeans clustering of the aggregated expression matrix
+for(cur_k in k_list){
+    cur_cluster <- kmeans(sfe2$mean_aggregatedExpression, centers = cur_k)
+    cluster_name <- paste0('niche_neighbors_knn', cur_k)
+    colData(sfe)[,cluster_name] <- factor(cur_cluster$cluster)
+}
+
+# plot the results for the different K values
+plot_list <- list()
+for(cur_k in k_list){
+    cluster_name <- paste0('niche_neighbors_knn', cur_k)
+    plot_list[[cluster_name]] <- plotSpatialFeature(
+        sfe, cluster_name, 
+        colGeometryName = "cellSeg") + Seurat::NoLegend() + 
+        ggtitle(paste0('k = ', cur_k))
+}
+
+pdf(paste0(cur_sample, '/figures/', 'spatial_niches.pdf'), width=12, height=6)
+wrap_plots(plot_list, ncol=5)
+dev.off()
+
+cur_k <- 5
+cluster_name <- paste0('niche_neighbors_knn', cur_k)
+p <- plotSpatialFeature(
+    sfe, cluster_name, 
+    colGeometryName = "cellSeg") + 
+    ggtitle(paste0('k = ', cur_k))
+
+pdf(paste0(cur_sample, '/figures/', 'spatial_niches_knn', cur_k,'.pdf'), width=6, height=6)
+p
+dev.off()
+
+#------------------------------------------------------------
+# step3: subset the micromet cluster, then perform 
+# leiden clustering to identify individual micromets
+#
+# continue here for the cur sample, 
+#------------------------------------------------------------
+table(colData(sfe)$niche_neighbors_knn5)
+
+
+# subset to remove the CNS cells 
+sfe_sub <- sfe[,sfe$cell_group != "CNS"]
+
+# subset the K-means cluster containing the micromets
+sfe_sub <- sfe_sub[,colData(sfe_sub)$niche_neighbors_knn5 %in% c(2,3,4)]
+
+
+p <- plotSpatialFeature(sfe_sub, "cell_group", colGeometryName = "cellSeg") 
+pdf(paste0(cur_sample, '/figures/','leiden_spatial_label2.pdf'), width=8, height=6)
+print(p)
+dev.off()
+
+
+
+# build a new KNN graph
+sfe_sub2 <- imcRtools::buildSpatialGraph(
+    sfe_sub, img_id = "SampleID",
+    type = 'knn', 
+    coords = c('x_centroid', 'y_centroid'),
+    k=3,
+)
+
+# perform louvain community detection
+# apparently there's no way to change the resolution parameter 
+# so I should just re-implement this directly with igraph?
+# sfe_sub2 <- imcRtools::detectCommunity(
+#     sfe_sub2, 
+#     colPairName = "knn_interaction_graph"
+# )
+#colData(sfe_sub)$spatial_community <- colData(sfe_sub2)$spatial_community
+
+# set up graph as igraph object
+g <- as.data.frame(colPairs(sfe_sub2)$knn_interaction_graph)
+g <- igraph::graph_from_data_frame(g, directed=FALSE)
+
+# run louvain
+clusters <- igraph::cluster_louvain(g, resolution=0.2)
+colData(sfe_sub)$spatial_community <- as.numeric(clusters$membership)
+
+# how many clusters?
+length(unique(sfe_sub$spatial_community))
+quantile(table(sfe_sub$spatial_community))
+names(which(table(sfe_sub$spatial_community) > max_size))
+table(sfe_sub$spatial_community)
+names(which(table(sfe_sub$spatial_community) < min_size))
+
+
+# remove large & small clusters
+max_size <- 500 
+min_size <- 15
+big_remove <- as.numeric(names(which(table(sfe_sub$spatial_community) > max_size)))
+small_remove <- as.numeric(names(which(table(sfe_sub$spatial_community) < min_size)))
+clusters_remove <- c(big_remove, small_remove)
+
+
+sfe_sub <- sfe_sub[,!sfe_sub$spatial_community %in% clusters_remove]
+
+
+
+# convert to factor:
+colData(sfe_sub)$spatial_community <- as.character(sfe_sub$spatial_community)
+
+# compute the cluster centroids (for plotting labels)
+centroid_df <- colData(sfe_sub) %>%
+    as.data.frame() %>%
+    group_by(spatial_community) %>% 
+    summarise(x = mean(x_centroid), y = mean(y_centroid))
+
+
+# plot the clusters in space
+p <- plotSpatialFeature(
+        sfe_sub, 'spatial_community', 
+        colGeometryName = "cellSeg") +
+        ggtitle("Clustering Micromets") + scale_fill_discrete() + 
+        ggrepel::geom_text_repel(
+            data = centroid_df,
+            mapping = aes(x=x, y=y),
+            label = centroid_df$spatial_community,
+            max.overlaps=Inf,
+            size=3
+        ) + NoLegend()
+
+
+pdf(paste0(cur_sample, '/figures/', 'spatial_community.pdf'), width=12, height=12)
+p
+dev.off()
+
+
+#-----------------------------------------------------------------
+# Step4: Refine the clustering by merging, filtering, refining
+#-----------------------------------------------------------------
+#colData(sfe_sub)$spatial_community<- sfe_sub$spatial_community_orig
+
+# sfe_sub_backup <- sfe_sub
+
+colData(sfe_sub)$spatial_community_orig <- sfe_sub$spatial_community
+
+# removing the big core section in the middle of the tissue 
+remove_clusters <- as.character(unique(c(
+    59, 60, 33, 30, 29, 49, 199, 48, 187, 47, 31, 46, 105, 45,
+    52, 35, 183, 44, 41, 38, 36, 37, 100, 103, 101, 190, 179,
+    196,53, 54, 188, 195, 25, 75, 26, 10, 14, 13, 12, 15, 8, 65, 66,
+    145, 143, 147, 144, 135, 73, 74, 72, 88, 91, 90, 194, 93, 94, 110, 111,
+    81, 79, 80, 94, 93, 89, 165, 142, 71, 69, 73, 74, 72, 88, 76, 43, 128,
+    129, 172, 173, 178
+)))
+
+colData(sfe_sub)$remove <- ifelse(
+    sfe_sub$spatial_community %in% remove_clusters,
+    'remove', 
+    sfe_sub$spatial_community
+)
+
+# compute the cluster centroids (for plotting labels)
+centroid_df <- colData(sfe_sub) %>%
+    as.data.frame() %>%
+    group_by(remove) %>% 
+    summarise(x = mean(x_centroid), y = mean(y_centroid))
+
+
+p <- plotSpatialFeature(
+        sfe_sub, 'remove', 
+        colGeometryName = "cellSeg") +
+        ggtitle("Clustering Micromets") + scale_fill_discrete() + 
+        ggrepel::geom_text_repel(
+            data = centroid_df,
+            mapping = aes(x=x, y=y),
+            label = centroid_df$remove,
+            max.overlaps=Inf,
+            size=3
+        ) + NoLegend()
+
+
+pdf(paste0(cur_sample, '/figures/', 'spatial_community_remove.pdf'), width=12, height=12)
+p
+dev.off()
+
+# remove the clusters:
+sfe_sub <- sfe_sub[,sfe_sub$remove != 'remove']
+
+# remove "micromets" that don't have any vascular or tumor cells:
+tmp <- colData(sfe_sub) %>% as.data.frame() %>% 
+    group_by(spatial_community, cell_group) %>% 
+    summarise(count = n())
+
+tumor_keep <- tmp %>% subset(cell_group == 'Tumor') %>% .$spatial_community %>% unique() %>% as.character()
+vasc_keep <- tmp %>% subset(cell_group == 'Vasculature') %>% .$spatial_community %>% unique() %>% as.character()
+groups_keep <- intersect(tumor_keep, vasc_keep)
+sfe_sub <- sfe_sub[,sfe_sub$spatial_community %in% groups_keep]
+
+
+# re-number the clusters based on how big they are 
+tmp <- table(as.character(sfe_sub$spatial_community))
+tmp2 <- names(tmp)
+
+tmp_order <- order(-tmp); 
+
+tmp2 <- names(tmp[tmp_order])
+names(tmp2) <- as.character(1:length(tmp2))
+
+
+ix <- match(sfe_sub$spatial_community, as.numeric(tmp2))
+sfe_sub$spatial_community <- names(tmp2)[ix]
+
+sfe_sub$spatial_community <- factor(
+    as.numeric(sfe_sub$spatial_community),
+    levels = 1:length(tmp)
+)
+
+# compute the cluster centroids (for plotting labels)
+centroid_df <- colData(sfe_sub) %>%
+    as.data.frame() %>%
+    group_by(spatial_community) %>% 
+    summarise(x = mean(x_centroid), y = mean(y_centroid))
+
+# plot the clusters in space
+p <- plotSpatialFeature(
+        sfe_sub, 'spatial_community', 
+        colGeometryName = "cellSeg") +
+        ggtitle("Clustering Micromets") + scale_fill_discrete() + 
+        geom_text(
+            data = centroid_df,
+            mapping = aes(x=x, y=y),
+            label = centroid_df$spatial_community,
+            size=3
+        ) 
+
+# get the color scheme
+g <- ggplot_build(p)
+color_df <- g$data[[1]] %>% dplyr::select(c('group', 'fill')) %>% dplyr::distinct()
+cp <- color_df$fill 
+names(cp) <- color_df$group
+
+pdf(paste0(cur_sample, '/figures/', 'spatial_community_refined.pdf'), width=10, height=8)
+p
+dev.off()
+
+
+
+#-----------------------------------------------------------------
+# Plot cell-type compositions of the micromets:
+#-----------------------------------------------------------------
+
+# get the color scheme:
+p <- plotSpatialFeature(sfe_sub, "cell_group", colGeometryName = "cellSeg") 
+
+pdf(paste0(cur_sample, '/figures/', 'leiden_spatial_merged_celltypes.pdf'), width=8, height=8)
+p
+dev.off()
+
+# get the color scheme
+g <- ggplot_build(p)
+color_df <- g$data[[1]] %>% dplyr::select(c('group', 'fill')) %>% dplyr::distinct()
+cp <- color_df$fill 
+names(cp) <- unique(sfe_sub$cell_group)
+
+
+
+plot_df <- table(sfe_sub$spatial_community, sfe_sub$cell_group) %>% 
+    as.data.frame() %>%
+    reshape2::melt()
+colnames(plot_df)[1:2] <- c('spatial_community', 'cell_group')
+
+
+p <- plot_df %>% 
+    ggplot(aes(x=spatial_community, y=value, fill=cell_group)) +
+    geom_bar(position='fill', stat='identity') +
+    ylab('Proportion') + 
+    xlab('Met group') +
+    scale_fill_manual(values=cp) + Seurat::RotatedAxis()
+
+
+pdf(paste0(cur_sample, '/figures/', 'spatial_community_proportions.pdf'), width=12, height=4)
+p
+dev.off()
+
+# make another plot but order by tumor fraction
+tmp <- plot_df %>% 
+    group_by(spatial_community) %>% 
+    summarise(total = sum(value))
+
+tmp2 <- plot_df %>% subset(cell_group == 'Tumor')
+frac <- tmp2$value / tmp$total
+names(frac) <- as.character(tmp$spatial_community)
+
+plot_df$spatial_community <- factor(
+    as.character(plot_df$spatial_community),
+    levels = as.character(names(frac)[order(-frac)])
+)
+
+p <- plot_df %>% 
+    ggplot(aes(x=spatial_community, y=value, fill=cell_group)) +
+    geom_bar(position='fill', stat='identity') +
+    ylab('Proportion') + 
+    xlab('Met group') +
+    scale_fill_manual(values=cp) + Seurat::RotatedAxis()
+
+
+pdf(paste0(cur_sample, '/figures/', 'spatial_community_proportions_ordered.pdf'), width=12, height=4)
+p
+dev.off()
+
+#-----------------------------------------------------------------
+# Save the dataset
+#-----------------------------------------------------------------
+
+# save the dataset
+saveRDS(sfe_sub, file=paste0(cur_sample, '/data/voyager_sfe_', cur_sample, '_micromet_clustering.rds'))
+
+```
+
+
+# Analyze signatures
+
+```{r eval=FALSE}
+
+#-----------------------------------------------------------------
+# Calculate Signatures (only in Tumor cells!!!)
+#-----------------------------------------------------------------
+
+genes_signature = list(
+    'micromets'= c('SOX2', 'BCL2', 'MXD4', 'CDKN1B', 'CDKN1A'),
+    'dormancy'= c('NDRG1', 'DYRK1A', 'ZEB2', 'THBS1', 'BMPR2', 'TGFBR3', 'AXL', 'BHLHE41', 'RHEB', 'NR2F1'),
+    'stress_general'= c('HIF1A', 'H2AZ1', 'NFE2L2', 'HSP90AA1', 'ATF6', 'ATM', 'ATR', 'NRF2', 'ATF3'),
+    'proliferation'= c('CDK4', 'PCNA', 'MKI67', 'TOP2A', 'CCNB2'),
+    'stress_ATF6' = c('ATF6',	'HSP90AA1',	'XBP1',	'CIP2A'),
+    'stress_DNA_damage' = c('H2AZ1',	'ATM',	'ATR'),
+    'dormancy_expanded' = c('RHEB',	'NR2F1',	'SOX9',	'AXL',	'ATF6',	'BMPR2',	'TGFBR3',	'RPS6KA5',	'NDRG1',	'BHLHE41',	'MTOR',	'DYRK1A',	'ZEB2',	'MAPK14',	'THBS1'),
+    'autophagy' = c('SQSTM1',	'BECN1',	'MAP1LC3B',	'CAV1',	'RPTOR',	'LAMP3'),
+    'chromosomal_instability' = c('PCNA',	'UBE2C',	'CCNB2',	'TOP2A')
+)
+
+# adjust the signatures to only include genes in the dataset 
+for(sig in names(genes_signature)){
+    cur_genes <- genes_signature[[sig]]
+    genes_signature[[sig]] <- cur_genes[cur_genes %in% rowData(sfe)$Symbol]
+}
+
+#sfe_tumor <- sfe_sub[,sfe_sub$cell_group == 'Tumor']
+meta <- colData(sfe_tumor)
+
+test <- UCell::ScoreSignatures_UCell(
+    as(counts(sfe_tumor), 'dgCMatrix'), 
+    features=genes_signature
+)
+colnames(test) <- names(genes_signature)
+colData(sfe_tumor) <- cbind(colData(sfe_tumor), test)
+
+
+
+
+# plot vln plots with seurat
+X <- counts(sfe_tumor)
+seurat_obj <- CreateSeuratObject(
+    counts=X, meta.data=as.data.frame(colData(sfe_tumor))
+)
+
+# loop through each signature:
+seurat_obj$plot_group <- seurat_obj$spatial_community
+
+# remove very small groups
+small_groups <- names(which(table(seurat_obj$plot_group) < 5))
+seurat_obj <- seurat_obj[,! seurat_obj$plot_group %in% small_groups]
+
+plot_list <- list()
+for(cur_sig in names(genes_signature)){
+    print(cur_sig)
+    cur_df <- seurat_obj@meta.data[,c('spatial_community', cur_sig)]
+    names(cur_df)[2] <- 'value'
+    cur_df <- cur_df %>% group_by(spatial_community) %>%
+        summarise(mean = mean(value)) %>%
+        arrange(desc(mean))
+
+    group_order <- as.character(cur_df$spatial_community)
+    seurat_obj$plot_group <- factor(
+        as.character(seurat_obj$plot_group),
+        levels = group_order
+    )
+
+    plot_list[[cur_sig]] <- VlnPlot(
+        seurat_obj, 
+        group.by = 'plot_group',
+        features = cur_sig,
+        pt.size=0
+    ) + NoLegend() + xlab('')
+
+}
+
+pdf(paste0(cur_sample, '/figures/', 'signature_vlnplot.pdf'), width=16, height=12)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+
+# micromet genes
+plot_list <- list()
+for(gene in genes_signature$micromet){
+
+    plot_list[[gene]] <- plotSpatialFeature(
+        sfe_sub, gene, colGeometryName = "cellSeg", dark=TRUE) 
+}
+
+
+pdf(paste0(cur_sample, '/figures/', 'signature_micromet_featureplots.pdf'), width=15, height=5)
+wrap_plots(plot_list, ncol=5)
+dev.off()
+
+
+median(table(sfe_sub$spatial_community))
+quantile(table(sfe_sub$spatial_community))
+
+#--------------------------------------------------------------------#
+# micromet-level signature plots (raincloud plot)
+#--------------------------------------------------------------------#
+
+library(gghalves)
+library(ggbeeswarm) 
+library(ggdist)
+library(ggpp)
+
+plot_df <- data.frame()
+for(cur_sig in names(genes_signature)){
+
+    cur_df <- as.data.frame(colData(sfe_tumor)[,c('spatial_community', cur_sig)])
+    colnames(cur_df)[2] <- 'score'
+    cur_df$signature <- cur_sig 
+    plot_df <- rbind(plot_df, cur_df)
+}
+
+# compute averages
+plot_df <- plot_df %>% 
+    group_by(spatial_community, signature) %>%
+    summarise(value = mean(score))
+
+sig_orders <- plot_df %>%
+    group_by(signature) %>%
+    summarise(x = mean(value)) %>% 
+    arrange(x) %>% .$signature
+
+plot_df$signature <- factor(as.character(plot_df$signature), levels=sig_orders)
+
+# add colors:
+#plot_df$color <- as.character(cp[as.character(plot_df$spatial_community)])
+
+# data frame for text boxes:
+top_df <- plot_df %>% 
+    group_by(signature) %>% 
+    slice_max(n=5, order_by=value) %>%
+    summarise(text=paste(spatial_community, collapse=','))
+
+bot_df <- plot_df %>%
+    group_by(signature) %>% 
+    slice_min(n=5, order_by=value) %>%
+    summarise(text=paste(spatial_community, collapse=','))
+
+text_df <- rbind(top_df, bot_df)
+
+
+
+
+p <- plot_df %>% 
+    ggplot(aes(y=signature, x=value, fill=signature)) +
+    stat_slab(side = "top", scale = 0.45,show.legend = F,
+            position = position_nudge(y = 0.1),
+            alpha=0.75,
+            aes(fill_ramp = stat(level)),.width = c(.50, .95,1)) +
+    geom_boxplot(
+        width = .05,outlier.alpha=0, alpha=0.75,
+        position = position_nudge(y = 0.05),show.legend = FALSE) +
+    stat_dots(
+        side = "bottom", scale = 0.45,show.legend = T,
+        position = position_dodge(width = .8), color=NA
+        ) +
+    scale_fill_ramp_discrete(from='black', aesthetics = "fill_ramp") +
+    guides(color="none", fill='none') +
+    RotatedAxis() + xlab('') + 
+    xlab('Signature expression score') +
+    ylab('') +
+    geom_label(
+        data=top_df, inherit.aes=FALSE,
+        aes(y=signature, x=1, label=text), size=3) + 
+    geom_label(
+        data=bot_df, inherit.aes=FALSE,
+        aes(y=signature, x=0.3, label=text), size=3) + 
+    theme(
+        panel.border=element_rect(size=1, color='black', fill=NA),
+        panel.grid.major.x = element_line(color='lightgrey', linewidth=0.25),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank()
+    ) + NoLegend() + 
+    scale_x_continuous(breaks = c(0.2, 0.4, 0.6, 0.8, 1.0), limits=c(0.2,1.1))
+ 
+
+
+pdf(paste0(cur_sample, '/figures/', 'signature_distributions.pdf'), width=10, height=5)
+p
+dev.off()
+
+```  
+
+Compare signatures to each other (correlation)
+at the micromet level (?)
+
+```{r eval=FALSE}
+
+signatures <- names(genes_signature)
+sig1 <- 'micromets'
+
+plot_list <- list()
+cor_df <- data.frame()
+for(sig1 in signatures){
+
+    for(sig2 in signatures){
+
+        print(paste0(sig1, sig2))
+        cur_df <- subset(plot_df, signature %in% c(sig1, sig2))
+        cur_df <- cur_df %>% 
+                    tidyr::pivot_wider(names_from=signature, values_from=value)
+                cur_df <- cur_df[,c('spatial_community', sig1, sig2)]
+                colnames(cur_df) <- c('spatial_community', 'sig1', 'sig2')
+
+        if(sig1 == sig2){next}
+        if(paste0(sig2, '_', sig1) %in% names(plot_list)){
+            plot_list[[paste0(sig1, '_', sig2)]] <- ggplot() + theme_void()
+            next
+        }
+
+        cur_cor <- cor(cur_df$sig1, cur_df$sig2)
+        cor_df <- rbind(cor_df, data.frame(cor=cur_cor, sig1=sig1, sig2=sig2))
+
+        p <- cur_df %>% 
+            ggplot(aes(x=sig1, y=sig2, color=spatial_community)) + 
+            geom_point() + 
+            geom_smooth(
+                inherit.aes=FALSE,
+                aes(x=sig1, y=sig2),
+                method='lm'
+            ) + 
+            ggpubr::stat_cor() + 
+            xlab(sig1) + ylab(sig2) + theme(
+                axis.line.y = element_blank(),
+                axis.line.x = element_blank(),
+                panel.border = element_rect(linewidth=0.5, fill=NA, color='black')
+            )
+
+        plot_list[[paste0(sig1, '_', sig2)]] <- p
+    }
+}
+
+
+pdf(paste0(cur_sample, '/figures/', 'signatures_compare.pdf'), width=20, height=20)
+wrap_plots(plot_list, ncol=length(signatures)) + plot_layout(guides='collect')
+dev.off()
+
+
+# Heatmap of correlations
+
+cor_df$sig1 <- factor(as.character(cor_df$sig1), levels=signatures)
+cor_df$sig2 <- factor(as.character(cor_df$sig2), levels=signatures)
+
+p <- cor_df %>% 
+    ggplot(aes(x=sig1, y=sig2, fill=cor)) + 
+    geom_tile() + 
+    coord_fixed() + RotatedAxis() + 
+    scale_fill_gradient2(high='red', mid='white', low='blue', limits=c(-1,1)) + 
+    geom_text(
+        data = subset(cor_df, abs(cor) > 0.5), 
+        aes(label=round(cor, 2))
+    ) + xlab('') + ylab('')
+
+
+pdf(paste0(cur_sample, '/figures/', 'signatures_compare_heatmap.pdf'), width=6, height=6)
+p
+dev.off()
+
+
+
+```
+
+Can I plot the micromets on the full dataset ? 
+
+```{r eval=FALSE}
+
+ix <- as.character(colData(sfe_sub)$spatial_community)
+names(ix) <- rownames(colData(sfe_sub))
+tmp <- ix[colnames(sfe)]
+colData(sfe)$spatial_community <- ifelse(is.na(tmp), 'other', tmp)
+colData(sfe)$spatial_community <- factor(
+    as.character(colData(sfe)$spatial_community), 
+    levels = c(levels(colData(sfe_sub)$spatial_community), 'other')
+)
+
+library(scales)
+library(RColorBrewer)
+
+
+cp <- hue_pal()(length(levels(sfe$spatial_community))-1) 
+cp <- c(cp, 'lightgrey')
+names(cp) <- levels(sfe$spatial_community)
+
+# compute the cluster centroids (for plotting labels)
+centroid_df <- colData(sfe_sub) %>%
+    as.data.frame() %>%
+    group_by(spatial_community) %>% 
+    summarise(x = mean(x_centroid), y = mean(y_centroid))
+
+# plot the clusters in space
+p <- plotSpatialFeature(
+        sfe, 'spatial_community', 
+        colGeometryName = "cellSeg") +
+        ggtitle("Clustering Micromets") + 
+        scale_fill_manual(values=cp) +
+        geom_text(
+            data = centroid_df,
+            mapping = aes(x=x, y=y),
+            label = centroid_df$spatial_community,
+            size=2
+        ) + NoLegend()
+
+
+pdf(paste0(cur_sample, '/figures/', 'spatial_community_refined_bg.pdf'), width=10, height=8)
+p
+dev.off()
+
+
+
+
+
+
+#-------------------------------------------------------#
+# Zoom plot per micromet
+#-------------------------------------------------------#
+
+
+
+plot_groups <- levels(sfe_sub$spatial_community)
+
+# define color palettes
+cp <- c(dittoSeq::dittoColors()[1:3], 'lightgrey')
+names(cp) <- levels(sfe_sub$plot_group)
+
+# bounding box offset
+offset <- 25
+
+bbox_df <- data.frame()
+plot_list <- list()
+for(cur_group in plot_groups){
+
+    print(cur_group)
+
+    # define the bbox for this group
+    cur_df <- colData(sfe_sub) %>% as.data.frame() %>%
+        subset(spatial_community == cur_group)
+
+    # current plotting group
+    colData(sfe)$plot_group <- ifelse(
+        colData(sfe)$spatial_community == cur_group & colData(sfe)$spatial_community != 'other',
+        colData(sfe)$cell_group, 'other'
+    )
+    colData(sfe)$plot_group <- factor(
+        as.character(colData(sfe)$plot_group),
+        levels = c('Tumor', 'Vasculature', 'Immune', 'other')
+    )
+
+    # define bounding box
+    bbox <- c(
+        xmin = min(cur_df$x_centroid) - offset,
+        ymin = min(cur_df$y_centroid) - offset,
+        xmax = max(cur_df$x_centroid) + offset,
+        ymax = max(cur_df$y_centroid) + offset
+    )
+
+    bbox_df <- rbind(bbox_df, bbox)
+
+    # plot the clusters in space
+    p <- plotSpatialFeature(
+            sfe, 'plot_group', 
+            colGeometryName = "cellSeg",
+            bbox = bbox
+        ) +
+        ggtitle(paste0("Micromet ", cur_group)) + 
+        labs(fill="") +
+        scale_fill_manual(values=cp) + theme(
+            plot.title = element_text(face='bold', hjust=0.5)
+        ) + theme(
+            panel.border=element_rect(fill=NA, linewidth=0.5, color='black')
+        ) + ggspatial::annotation_scale()
+        
+    plot_list[[cur_group]] <- p
+
+}
+names(bbox_df) <- c('xmin', 'ymin', 'xmax', 'ymax')
+
+pdf(paste0(cur_sample, '/figures/', 'spatial_community_micromets_zoom.pdf'), width=20, height=10)
+wrap_plots(plot_list, ncol=10) + plot_layout(guides='collect')
+dev.off()
+
+
+# plot the full spatial section
+cp <- hue_pal()(length(levels(sfe$spatial_community))-1) 
+cp <- c(cp, 'lightgrey')
+names(cp) <- levels(sfe$spatial_community)
+
+
+# compute the cluster centroids (for plotting labels)
+centroid_df <- colData(sfe_sub) %>%
+    as.data.frame() %>%
+    group_by(spatial_community) %>% 
+    summarise(x = mean(x_centroid), y = mean(y_centroid))
+
+# scale bar length 
+plot_len <- max(sfe$x_centroid) - min(sfe$x_centroid)
+plot_len / 10
+
+p_full <-  plotSpatialFeature(
+        sfe, 'spatial_community', 
+        colGeometryName = "cellSeg") +
+        ggtitle("Clustering Micromets"
+    ) + 
+    geom_rect(
+            data = bbox_df, inherit.aes=FALSE,
+            aes(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax),
+            fill=NA, color='black', linewidth=0.25
+    ) + 
+    geom_text(
+        data = centroid_df,
+        mapping = aes(x=x, y=y),
+        label = centroid_df$spatial_community,
+        size=2
+    ) +
+    scale_fill_manual(values=cp) + NoLegend() + theme(
+        plot.title= element_text(hjust=0.5, face='bold')
+    ) +
+    ggspatial::annotation_scale()
+
+
+
+# plot the full spatial region with all the boxes 
+pdf(paste0(cur_sample, '/figures/', 'spatial_community_refined_bg_boxes.pdf'), width=8, height=8)
+p_full
+dev.off()
+
+
+
+
+```
+
+
+Modeling gene expression as a function of distance to vasculature
+
+```{r eval=FALSE}
+
+meta <- as.data.frame(colData(sfe_sub))
+meta$bc <- rownames(meta)
+
+# test for micromet 
+cur_group <- 15
+
+cur_meta <- subset(meta, spatial_community == cur_group)
+cur_coords <- cur_meta %>% dplyr::select(x_centroid, y_centroid) %>%
+    as.matrix
+
+cur_distances <- dist(cur_coords, method='euclidean', diag=TRUE) %>%
+    as.matrix() %>%
+    reshape2::melt() %>%
+    as.data.frame() %>%
+    dplyr::rename(dist=value) %>%
+    subset(Var1 != Var2)
+
+# transfer cell type labels to the distance table
+tmp1 <- left_join(cur_distances,meta, by = c('Var1' = 'bc'))
+tmp2 <- left_join(cur_distances,meta, by = c('Var2' = 'bc'))
+cur_distances$group1 <- tmp1$cell_group
+cur_distances$group2 <- tmp2$cell_group
+
+# look at expression of one gene
+gene_list <- rownames(sfe)
+cur_gene <- gene_list[1]
+X <- counts(sfe_sub)
+#X <- logcounts(sfe_sub)
+
+model_list <- list()
+summary_list <- list()
+p_list <- c()
+for(cur_gene in gene_list){
+    print(cur_gene)
+
+    # linear model to test the relationship between vascular distance and expression level
+    model_df <- cur_distances %>%
+        subset(group1 == 'Tumor' & group2 == 'Vasculature') %>%
+        group_by(Var1) %>%
+        summarise(avg_dist = mean(dist))
+
+    model_df$expression <- X[cur_gene, model_df$Var1]
+
+    # set up vars
+    y <- model_df$expression 
+    x <- model_df$avg_dist 
+
+    # linear model 
+    cur_model_lm <- lm(y ~ x)
+    cur_summary <- summary(cur_model_lm)
+
+    # the p-val:
+    p_list <- c(p_list, as.numeric(cur_summary$coefficients[,4][2]))
+
+    model_list[[cur_gene]] <- cur_model_lm
+    summary_list[[cur_gene]] <- cur_summary
+    # glm
+    # cur_model_glm <- glm(y ~ x, family = 'gaussian')
+    # cur_model_glm_null <- glm(y ~ 1, family = 'gaussian')
+    # anova(cur_model_glm, cur_model_glm_null, test='Chisq')
+
+}
+names(p_list) <- gene_list
+p_list <- na.omit(p_list)
+p_df <- data.frame(
+    gene = names(p_list),
+    p_val = as.numeric(p_list)
+)
+p_df$fdr <- p.adjust(p_df$p_val, 'fdr')
+
+subset(p_df, p_val < 0.05)
+subset(p_df, fdr < 0.05)
+
+
+```
+
+
+
+
+
+
+Pie charts showing % of cells expressing markers 
+
+```{r eval=FALSE}
+
+# gene list for micromet genes:
+gene_list <- c('SOX2', 'BCL2', 'MXD4', 'CDKN1B', 'CDKN1A')
+
+# expresion matrix:
+X <- counts(sfe_tumor)
+
+
+groups <- levels(sfe_tumor$spatial_community)
+plot_df <- data.frame()
+mxd4_df <- data.frame() 
+for(cur_group in c(groups, 'all')){
+    print(cur_group)
+
+    # get current exp
+    if(cur_group == 'all'){
+        cur_X <- X
+    } else{
+        cur_X <- X[,sfe_tumor$spatial_community %in% cur_group]
+    }
+    cur_binary <- cur_X; cur_binary[cur_binary > 1 ] <- 1
+
+    # what % express any of these markers?
+    sum(colSums(cur_binary[gene_list,]) > 0) / ncol(cur_X) * 100 
+    n_list <- c()
+    for(i in 0:length(gene_list)){
+        n_list <- c(n_list,
+            sum(colSums(cur_binary[gene_list,]) == i)
+        )
+    }
+    
+    # what % express MXD4?
+    cur_mxd4 <- sum(cur_binary["MXD4", ]) / ncol(cur_X)
+    mxd4_df <- rbind(
+        mxd4_df, 
+        data.frame(
+            proportion = c(cur_mxd4, 1-cur_mxd4),
+            group = c(cur_group, cur_group),
+            pos = c('MXD4+', 'MXD4-')
+    ))
+
+
+    cur_df <- data.frame(
+        'n_cells' = n_list,
+        'proportion' = n_list / ncol(cur_X),
+        'n_genes' = 0:length(gene_list),
+        'group' = cur_group
+    )
+
+    plot_df <- rbind(plot_df, cur_df)
+
+}
+
+sum(is.na(plot_df))
+sum(is.na(plot_df$n_genes))
+
+unique(plot_df$n_genes)
+
+# set factor levels
+plot_df$n_genes <- factor(
+    as.numeric(plot_df$n_genes),
+    levels = 0:length(gene_list)
+)
+sum(is.na(plot_df$n_genes))
+
+
+#plot_df$n_genes <- as.numeric(plot_df$n_genes)
+
+plot_df$group <- factor(
+    as.character(plot_df$group),
+    levels = c(levels(sfe_tumor$spatial_community), 'all')
+)
+
+# Get the positions
+df2 <- plot_df %>% group_by(group) %>%
+  mutate(csum = rev(cumsum(rev(proportion))), 
+         pos = proportion/2 + lead(csum, 1),
+         pos = if_else(is.na(pos), proportion/2, pos))
+
+
+
+# make pie charts
+p <- plot_df %>% subset(proportion > 0) %>%
+    ggplot(aes(x = "", y = proportion, fill=n_genes)) + 
+    geom_col(color='black') + 
+    ggrepel::geom_text_repel(
+        data = subset(df2, proportion > 0.05),
+        aes( y = pos,
+            label = paste0(round(proportion, digits=2)*100, '%')), 
+            size=3, nudge_x = 1, show.legend=FALSE) + 
+    coord_polar(theta="y") + 
+    #viridis::scale_fill_viridis() + 
+    scale_fill_brewer() +
+    theme_void()
+
+
+patch <- p + facet_wrap(~group, ncol=10)
+
+pdf(paste0(cur_sample, '/figures/', 'micromet_pie.pdf'), width=18, height=18)
+patch 
+dev.off()
+
+
+# plot the mxd4% 
+group_order <- mxd4_df %>% subset(pos == 'MXD4+') %>% arrange(desc(proportion)) %>% .$group
+
+
+mxd4_df$group <- droplevels(factor(as.character(mxd4_df$group), levels=group_order))
+
+p <- mxd4_df %>% 
+    ggplot(aes(x=group, y=proportion, fill=pos)) +
+    geom_bar(position='fill', stat='identity') +
+    ylab('Proportion') + 
+    xlab('Met group') + scale_fill_manual(values=c('grey90', 'grey70')) + 
+    labs(fill='') + RotatedAxis()
+
+pdf(paste0(cur_sample, '/figures/', 'mxd4_proportions.pdf'), width=12, height=2)
+p
+dev.off()
+
+
+```
+
+MicroMet FindMarkers (?)
+
+```{r eval=FALSE}
+
+# plot vln plots with seurat
+X <- logcounts(sfe_tumor)
+seurat_obj <- CreateSeuratObject(
+    counts=X, meta.data=as.data.frame(colData(sfe_tumor))
+)
+Idents(seurat_obj) <- seurat_obj$spatial_community
+
+# loop through each signature:
+markers <- FindAllMarkers(
+    seurat_obj,
+    slot = 'counts',
+    test.use = 'wilcox',
+    only.pos=TRUE
+) %>% subset(p_val_adj <= 0.05 & avg_log2FC > 1)
+
+head(markers)
+table(markers$cluster)
+length(unique(markers$gene))
+
+
+
+
+```
+
+ComplexHeatmap of micromets (?)
+
+```{r eval=FALSE}
+
+library(ComplexHeatmap)
+
+genes_plot <- markers %>% group_by(cluster) %>% slice_max(n=3, order_by=avg_log2FC) %>%  .$gene %>% unique()
+
+# calculate pseudo-bulk expression of tumor cells per micromet
+X <- counts(sfe_tumor) 
+groups <- levels(sfe_tumor$spatial_community)
+
+pb_df <- data.frame()
+for(cur_group in groups){
+    print(cur_group)
+    cur_pb <- rowSums(X[,sfe_tumor$spatial_community == cur_group])
+    cur_df <- data.frame(gene = names(cur_pb), count = as.numeric(cur_pb), group = cur_group)
+    pb_df <- rbind(pb_df, cur_df)
+}
+X_pb <- pb_df %>% tidyr::pivot_wider(names_from=gene, values_from=count) %>% as.data.frame()
+rownames(X_pb) <- X_pb[,1]
+X_pb <- X_pb[,-1]
+X_pb <- as.matrix(X_pb)
+
+# normalize
+X_norm <- t(apply(X_pb, 1, function(x){
+     y <- (x) / sum(x) * 10000
+    log1p(y + 1)
+}))
+
+plot_mat <- base::scale(X_norm[,genes_plot])
+
+pdf(paste0(cur_sample, '/figures/', 'micromet_heatmap.pdf'), width=10, height=16)
+
+Heatmap(t(plot_mat), cluster_rows=FALSE, cluster_columns=FALSE)
+
+dev.off()
+
+```  

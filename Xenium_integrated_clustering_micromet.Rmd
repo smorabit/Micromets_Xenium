@@ -1,0 +1,233 @@
+```{r eval=FALSE}
+
+# interactive 8 128G 10:00:00 genD
+# conda activate spatial-2024
+
+# note: don't update packages!!!!!!!
+
+library(Voyager)
+library(SpatialFeatureExperiment)
+library(rjson)
+library(Matrix)
+library(SFEData)
+library(RBioFormats)
+
+
+library(SingleCellExperiment)
+library(SpatialExperiment)
+library(ggplot2)
+library(stringr)
+library(scater) 
+library(scuttle)
+library(BiocParallel)
+library(BiocSingular)
+library(bluster)
+library(scran)
+library(patchwork)
+theme_set(theme_bw())
+
+library(tidyverse)
+
+
+```
+
+```{r eval = FALSE}
+
+setwd('~/collab/Valiente_2024/individual/')
+data_dir <- 'data/'
+fig_dir <- 'figures/'
+
+
+# load one SFE dataset
+
+cur_sample <- '134990_left'
+sfe <- readRDS(paste0(cur_sample, '/data/voyager_sfe_', cur_sample, '.rds'))
+
+# load the marker gene table:
+
+
+```
+
+
+Calculate signature 
+
+```{r eval=FALSE}
+
+genes_select <- c('SOX2', 'BCL2', 'CDKN1A', 'P21', 'P7')
+genes_select <- genes_select[genes_select %in% rownames(sfe)]
+genes_signature = list("sig" = genes_select)
+
+genes_signature = list(
+    'micromets'= c('SOX2', 'BCL2', 'MXD4', 'CDKN1B', 'CDKN1A'),
+    'endothelia'= c('STAT3', 'FLT1', 'NOTCH1', 'NRP1', 'THSD4', 'PECAM1', 'CAV1'),
+    'dormancy'= c('NDRG1', 'DYRK1A', 'ZEB2', 'THBS1', 'BMPR2', 'TGFBR3', 'AXL', 'BHLHE41', 'RHEB', 'NR2F1'),
+    'stress'= c('HIF1A', 'NFE2L2', 'HSP90AA1'),
+    'proliferation'= c('CDK4', 'PCNA', 'MKI67', 'TOP2A')
+)
+
+test <- UCell::ScoreSignatures_UCell(
+    as(logcounts(sfe), 'dgCMatrix'), 
+    features=genes_signature
+)
+colnames(test) <- names(genes_signature)
+colData(sfe) <- cbind(colData(sfe), test)
+
+
+plot_list <- list()
+for(gene in names(genes_signature)){
+
+    plot_list[[gene]] <- plotSpatialFeature(
+        sfe, gene, colGeometryName = "cellSeg", dark=TRUE) 
+}
+
+
+pdf(paste0(cur_sample, '/figures/', 'signature_featureplots.pdf'), width=8, height=6)
+wrap_plots(plot_list, ncol=3)
+dev.off()
+
+
+
+sfe <- runUnivariate(
+    sfe, type='localmoran', features=c(genes_select, 'signature'),
+    colGraphName='knn5'
+)
+
+sfe <- colDataUnivariate(
+    sfe, type = "localmoran", features = 'signature'
+  )
+
+p <- plotLocalResult(
+    sfe, "localmoran", features = c(genes_select, 'signature'), 
+    colGeometryName = "centroids", ncol = 2, divergent = TRUE,
+    diverge_center = 0, scattermore = TRUE, pointsize = 0.3, dark=FALSE
+)
+
+
+pdf(paste0(fig_dir, 'featureplots_moran.pdf'), width=8, height=6)
+p
+dev.off()
+
+```
+
+
+Create a joint seurat obj 
+
+```{r eval=FALSE}
+
+individual_dir <- '~/collab/Valiente_2024/individual/'
+sample_list <- dir(individual_dir)
+
+# load all SFE objects 
+
+sfe_list <- list()
+meta_list <- list()
+mtx_list <- list()
+for(cur_sample in sample_list){
+    cur_file <- paste0(individual_dir, cur_sample, '/data/voyager_sfe_', cur_sample, '.rds')
+    if(file.exists(cur_file)){
+        print(cur_sample)
+        cur_sfe <- readRDS(cur_file)
+        X <- as(counts(cur_sfe), 'dgCMatrix')
+        sfe_list[[cur_sample]] <- cur_sfe
+        meta_list[[cur_sample]] <- colData(cur_sfe)
+    }
+}
+
+
+library(Seurat)
+
+# create a list of Seurat objects, without the spatial info 
+seurat_list <- lapply(sfe_list, function(sfe){
+
+    X <- as(counts(sfe), "dgCMatrix")
+    rownames(X) <- rownames(sfe); colnames(X) <- colnames(sfe)
+    X_assay <- SeuratObject::CreateAssayObject(X)
+    CreateSeuratObject(
+        X_assay,
+        meta.data = as.data.frame(colData(sfe))
+    )
+})
+
+xenium_obj <- merge(
+    seurat_list[[1]],
+    seurat_list[2:length(seurat_list)]
+)
+
+dim(xenium_obj)
+
+```
+
+
+Process the Xenium dataset 
+
+```{r eval=FALSE}
+
+xenium_obj <- NormalizeData(xenium_obj)
+xenium_obj <- ScaleData(xenium_obj, features=rownames(xenium_obj))
+xenium_obj <- RunPCA(xenium_obj, features=rownames(xenium_obj))
+xenium_obj <- harmony::RunHarmony(xenium_obj, group.by.vars = 'SampleID')
+
+
+xenium_obj <- FindNeighbors(xenium_obj, reduction='harmony', dims=1:15)
+xenium_obj <- FindClusters(xenium_obj)
+xenium_obj <- RunUMAP(xenium_obj, reduction='harmony', dims=1:15)
+
+
+p <- DimPlot(xenium_obj)
+pdf(paste0(fig_dir, 'seurat_umap_clustering.pdf'), width=10, height=10)
+p 
+dev.off()
+
+
+
+
+group1 <- 'SampleID'
+group2 <- 'seurat_clusters'
+
+seurat_meta <- xenium_obj@meta.data
+batches <- seurat_meta[,group1] %>% unique %>% as.character
+cur_clusters  <- seurat_meta[,group2] %>% unique %>% as.character
+scale_vec <- table(seurat_meta[,group1])
+
+seurat_meta$group1 <- seurat_meta[,group1]
+seurat_meta$group2 <- seurat_meta[,group2]
+
+proportion_df <- data.frame()
+for(i in 1:length(cur_clusters)){
+
+    # subset by this cluster
+    cluster_meta <- subset(seurat_meta, group2 == cur_clusters[i])
+    cur_df <- as.data.frame(table(cluster_meta$group1)) %>% dplyr::rename(Count = Freq)
+
+    # compute the non-normalized % of cells in each group
+    cur_df$Freq <- cur_df$Count / sum(cur_df$Count)
+
+    # scale frequency to the total number of clusters in each sample
+    
+    # add to ongoing proportion df
+    cur_df$group2 <- cur_clusters[i]
+    proportion_df <- rbind(proportion_df, cur_df)
+}
+
+proportion_df <- dplyr::rename(proportion_df, group1 = Var1)
+
+p <- ggplot(proportion_df, aes(y=Freq, x=group2, fill=group1)) +
+  geom_bar(stat='identity') +
+ # geom_hline(yintercept = 0.5, linetype='dashed') +
+  scale_y_continuous(expand = c(0,0)) +
+  #scale_fill_manual(values=sample_colors) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_line(colour = "black"),
+    axis.line.x = element_blank()
+  )
+
+pdf(paste0(fig_dir, 'cluster_proportion_', group1, '_', group2, '.pdf'), height=4, width=10)
+print(p)
+dev.off()
+
+```
